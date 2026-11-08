@@ -135,6 +135,9 @@ fires for shells that report their working directory, so the timer is the reliab
 Only local blocks are scanned. A block that runs on another Rex host has paths the local server
 cannot see.
 
+The watcher only fetches: it does not pull, and it does not display the result. Use your shell
+prompt or a status tool to show the branch state.
+
 The watcher stops when the Rex server stops, and `rex config reload` restarts it when this
 configuration changes. `rex config check` reports a bad option; fix it before reloading, or the
 watcher stays stopped.
@@ -174,9 +177,9 @@ each repository.
 - No cron entry and no `~/.zshrc` hook. The watcher is a Rex Lua script, so it starts and stops
   with the server.
 - Configuration lives in `init.lua` instead of tmux options.
-- Worktrees of one repository are fetched once, not once per pane.
+- Worktrees of one repository share a single fetch, because the watcher keys repositories by
+  `git-common-dir`; the tmux plugin treats each worktree as its own repository.
 - Failures are visible in `state.json` and the optional log instead of `/tmp`.
-- It fetches only; it does not pull, and it does not draw a status bar.
 
 ## License
 
