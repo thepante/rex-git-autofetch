@@ -180,7 +180,3 @@ each repository.
 - Worktrees of one repository share a single fetch, because the watcher keys repositories by
   `git-common-dir`; the tmux plugin treats each worktree as its own repository.
 - Failures are visible in `state.json` and the optional log instead of `/tmp`.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
