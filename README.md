@@ -5,8 +5,8 @@ branch status reflects the remote without running `git fetch`.
 
 This is the Rex counterpart of
 [tmux-git-autofetch](https://github.com/thepante/tmux-git-autofetch). It keeps the same idea and
-drops the pieces tmux needed: there is no cron entry and no shell hook. A small Lua watcher lives
-inside the Rex server, reads the directory of every terminal pane, and fetches each repository at
+drops the pieces tmux needed: there is no cron entry and no shell hook. The Rex server starts a
+small Lua watcher that reads the directory of every terminal pane and fetches each repository at
 most once every few minutes.
 
 ## Requirements

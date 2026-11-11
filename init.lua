@@ -6,7 +6,7 @@
 -- the watcher: a timer scans the panes and terminal.pwd_changed triggers a scan
 -- earlier for shells that report their directory.
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 local MODULE = "rex-git-autofetch"
 local TERMINAL = "com.superlogical.terminal"
 
@@ -135,17 +135,16 @@ local function pattern_match(pattern, path)
   if anchored_end then
     text = text:sub(1, -2)
   end
-  local index = path:find(text, 1, true)
-  if not index then
-    return false
+  if anchored_start and anchored_end then
+    return path == text
   end
-  if anchored_start and index ~= 1 then
-    return false
+  if anchored_start then
+    return path:sub(1, #text) == text
   end
-  if anchored_end and index + #text - 1 ~= #path then
-    return false
+  if anchored_end then
+    return path:sub(-#text) == text
   end
-  return true
+  return path:find(text, 1, true) ~= nil
 end
 
 local function any_match(patterns, path)
@@ -508,10 +507,6 @@ local function scan_once(opts, state)
   if sessions and sessions.sessions then
     for _, session in ipairs(sessions.sessions) do
       scanned_sessions = scanned_sessions + 1
-      local attached, attach_error = rex.call("session.attach", { session_id = session.session_id })
-      if not attached then
-        log_line(opts, "attach " .. session.session_id .. ": " .. tostring(attach_error))
-      end
       local blocks, blocks_error = rex.call("session.list_blocks", { session_id = session.session_id })
       if not blocks then
         log_line(opts, "blocks " .. session.session_id .. ": " .. tostring(blocks_error))
@@ -536,7 +531,6 @@ local function scan_once(opts, state)
           end
         end
       end
-      rex.call("session.detach", { session_id = session.session_id })
     end
   end
 
@@ -565,8 +559,10 @@ local function scan_once(opts, state)
       end
     end
   end
-  for dir in pairs(state.repos) do
-    if not seen[dir] then
+  -- A repository out of sight keeps its entry until its window passes:
+  -- dropping it at once made leaving and re-entering fetch again.
+  for dir, repo in pairs(state.repos) do
+    if not seen[dir] and now - (repo.last_fetch or 0) >= opts.frequency * 60 then
       state.repos[dir] = nil
     end
   end
@@ -659,7 +655,12 @@ local function run_daemon(args)
     schedule("pwd")
   end)
   rex.log("info", MODULE .. ": started")
-  scan("start")
+  -- The first scan runs from a timer: session.list_blocks answers only once
+  -- the script hears the sessions, after its top level returns. Attaching by
+  -- hand needs a detach, and a detached session stops sending its events.
+  rex.after(0, function()
+    scan("start")
+  end)
 end
 
 if type(rex.args) == "table" and rex.args.daemon then
