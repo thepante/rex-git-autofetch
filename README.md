@@ -52,12 +52,12 @@ Pass a table to `setup`. Every option is optional.
 | `enabled` | `true` | Set to `false` to stop the watcher. |
 | `frequency` | `3` | Minutes between fetches of the same repository. `0` fetches on every scan. |
 | `scan_interval` | `60` | Seconds between scans of the open terminals. |
-| `timeout` | `120` | Seconds a single `git fetch` may run before Rex stops it. |
+| `timeout` | `10` | Seconds a single `git fetch` may run before Rex stops it. Raise it for a repository whose fetch needs longer. |
 | `git` | `"git"` | Name or absolute path of the git program. |
 | `ssh_command` | none | Value for `GIT_SSH_COMMAND`, such as `"ssh -o BatchMode=yes"`. |
 | `scan_paths` | none | Only fetch panes whose directory matches one of these patterns. |
 | `skip_paths` | none | Never fetch panes whose directory matches one of these patterns. |
-| `log` | `false` | Append scans and errors to `git-autofetch.log` in the state directory. |
+| `log` | `false` | Append fetches, errors, and scan summaries to `git-autofetch.log` in the state directory. The log rotates to `git-autofetch.log.1` at 1 MB. |
 | `state_dir` | `~/.local/state/rex-git-autofetch` | Where the watcher keeps its PID, state, and log. |
 
 For example:
@@ -66,7 +66,7 @@ For example:
 require("rex-git-autofetch").setup({
   frequency = 5,
   scan_paths = {
-    "^" .. os.getenv("HOME") .. "/Projects/",
+    "^~/Projects/",
     "/probandoski/",
   },
   skip_paths = "/vendor/",
@@ -81,7 +81,8 @@ repository that directory belongs to. Each entry is plain text:
 
 - A `^` at the start anchors the match to the start of the path.
 - A `$` at the end anchors it to the end.
-- A leading `~` expands to your home directory.
+- A `~` at the start, or right after `^`, expands to your home directory.
+- A pattern that ends in `/` matches that directory and every path under it.
 - `skip_paths` wins over `scan_paths`: a path allowed by one pattern is still skipped when another
   pattern in `skip_paths` matches it.
 
@@ -91,11 +92,15 @@ Patterns are plain text, not regular expressions. Write one entry per path:
 scan_paths = { "/work/", "/clients/" }
 ```
 
-To match a whole tree, anchor the front: `"^" .. os.getenv("HOME") .. "/Projects/"` matches every
-path under `~/Projects`, and nothing else.
+To match a whole tree, anchor the front: `"^~/Projects/"` matches `~/Projects` and every path
+under it, and nothing else.
 
 A path that matches no `scan_paths` entry is ignored. When `scan_paths` is unset, every pane is
 eligible.
+
+**Caution:** Set `scan_paths` to the directories you trust. `git fetch` runs the commands that a
+repository's own configuration names, such as `core.sshCommand`. When `scan_paths` is unset, the
+watcher runs them for every repository you enter, including one unpacked from an archive.
 
 ## Actions
 
@@ -111,6 +116,9 @@ Run them from the command line:
 ```sh
 rex do git_autofetch_status
 ```
+
+The status reports `stale: true` when the watcher runs but its last scan is older than three scan
+intervals.
 
 Bind them in `init.lua` if you want a key:
 
@@ -129,6 +137,9 @@ rex.bind("prefix/g", "git_autofetch_status")
    count as one.
 4. Runs `git fetch --quiet --all` once per repository, at most every `frequency` minutes.
 
+A repository whose fetch fails waits twice as long after each failure in a row, up to eight times
+`frequency`. The next fetch that works resets the wait.
+
 It also listens for `terminal.pwd_changed` and schedules a scan two seconds later. That event only
 fires for shells that report their working directory, so the timer is the reliable path.
 
@@ -139,7 +150,8 @@ The watcher only fetches: it does not pull, and it does not display the result. 
 prompt or a status tool to show the branch state.
 
 The watcher stops when the Rex server stops, and `rex config reload` restarts it when this
-configuration changes. `rex config check` reports a bad option; fix it before reloading, or the
+configuration changes. A watcher that was replaced, or whose state directory was removed, stops
+on its next scan. `rex config check` reports a bad option; fix it before reloading, or the
 watcher stays stopped.
 
 ## Troubleshooting
@@ -156,6 +168,9 @@ that Rex reads.
 same SSH agent and keys as your shell. On macOS the server usually inherits `SSH_AUTH_SOCK`; when
 it does not, set `ssh_command` to a command that uses the key you want, or use an HTTPS remote
 with a credential helper.
+
+**A fetch times out.** The status shows `timed out after 10 seconds` for the repository. A fetch
+that Rex stops starts over on the next try, so raise `timeout` when a repository needs longer.
 
 **`git` is not found.** Set `git` to the absolute path, such as
 `"/opt/homebrew/bin/git"`. This helps when the server starts with a minimal `PATH`.

@@ -6,15 +6,16 @@
 -- the watcher: a timer scans the panes and terminal.pwd_changed triggers a scan
 -- earlier for shells that report their directory.
 
-local VERSION = "1.0.1"
+local VERSION = "1.1.0"
 local MODULE = "rex-git-autofetch"
 local TERMINAL = "com.superlogical.terminal"
+local LOG_LIMIT = 1024 * 1024
 
 local DEFAULTS = {
   enabled = true,
   frequency = 3,
   scan_interval = 60,
-  timeout = 120,
+  timeout = 10,
   git = "git",
   ssh_command = nil,
   scan_paths = nil,
@@ -72,7 +73,8 @@ local function normalize_patterns(value, name)
     if type(pattern) ~= "string" then
       error(name .. " must contain only strings", 0)
     end
-    patterns[index] = expand_home(pattern)
+    local anchor, rest = pattern:match("^(%^?)(.*)$")
+    patterns[index] = anchor .. expand_home(rest)
   end
   return patterns
 end
@@ -134,6 +136,10 @@ local function pattern_match(pattern, path)
   end
   if anchored_end then
     text = text:sub(1, -2)
+  end
+  -- "/work/" also matches a pane in /work itself, not only below it.
+  if text:sub(-1) == "/" and path:sub(-1) ~= "/" then
+    path = path .. "/"
   end
   if anchored_start and anchored_end then
     return path == text
@@ -240,17 +246,6 @@ local function process_command(pid)
   return ""
 end
 
-local function stop_pid(pid)
-  if not pid or not process_alive(pid) then
-    return false
-  end
-  if not process_command(pid):find(MODULE, 1, true) then
-    return false
-  end
-  rex.exec({ "kill", "-TERM", tostring(pid) }, { stdout = false, stderr = false })
-  return true
-end
-
 local function executable(path)
   if not path or path == "" then
     return false
@@ -339,9 +334,12 @@ local function common_dir(opts, path)
   return dir
 end
 
-local function error_text(result)
+local function error_text(opts, result)
   if not result then
     return "git did not run"
+  end
+  if result.timed_out then
+    return "timed out after " .. opts.timeout .. " seconds"
   end
   local text = trim(result.stderr or "")
   if text == "" then
@@ -371,12 +369,17 @@ local function log_line(opts, line)
   if not opts.log then
     return
   end
-  local file = io.open(opts.state_dir .. "/git-autofetch.log", "a")
+  local path = opts.state_dir .. "/git-autofetch.log"
+  local file = io.open(path, "a")
   if not file then
     return
   end
   file:write(os.date("%Y-%m-%d %H:%M:%S "), line, "\n")
+  local size = file:seek("end")
   file:close()
+  if size and size > LOG_LIMIT then
+    os.rename(path, path .. ".1")
+  end
 end
 
 local function daemon_args(opts)
@@ -409,10 +412,17 @@ local function daemon_running(state_dir)
   if not pid or not process_alive(pid) then
     return nil
   end
-  if not process_command(pid):find(MODULE, 1, true) then
+  local current = read_json(state_dir .. "/daemon.json")
+  -- A watcher started before 1.1.0 has no token: its command names the module.
+  local marker = current and current.token or MODULE
+  if not process_command(pid):find(marker, 1, true) then
     return nil
   end
   return pid
+end
+
+local function format_time(value)
+  return value and os.date("%Y-%m-%d %H:%M:%S", value)
 end
 
 local setup
@@ -427,9 +437,20 @@ local function define_actions(opts)
     run = function()
       local pid = daemon_running(opts.state_dir)
       local state = read_json(opts.state_dir .. "/state.json")
+      local stale = false
+      if state then
+        stale = pid ~= nil and state.last_scan ~= nil and
+          os.time() - state.last_scan > opts.scan_interval * 3
+        state.started_at = format_time(state.started_at)
+        state.last_scan = format_time(state.last_scan)
+        for _, repo in ipairs(state.repos or {}) do
+          repo.last_fetch = format_time(repo.last_fetch)
+        end
+      end
       return {
         running = pid ~= nil,
         pid = pid,
+        stale = stale,
         state = state,
       }
     end,
@@ -448,23 +469,24 @@ end
 start = function(opts)
   rex.exec({ "mkdir", "-p", opts.state_dir }, { stdout = false, stderr = false })
 
+  local args = daemon_args(opts)
   local pid = daemon_running(opts.state_dir)
   if pid then
-    local desired = daemon_args(opts)
     local current = read_json(opts.state_dir .. "/daemon.json")
-    if opts.enabled and deep_equal(current, desired) then
+    args.token = current and current.token
+    if opts.enabled and deep_equal(current, args) then
       return { running = true, pid = pid }
     end
-    stop_pid(pid)
-    if not opts.enabled then
-      return { running = false }
-    end
+    rex.exec({ "kill", "-TERM", tostring(pid) }, { stdout = false, stderr = false })
   end
   if not opts.enabled then
+    -- Without daemon.json, a watcher the PID file does not name stops too.
+    os.remove(opts.state_dir .. "/daemon.json")
     return { running = false }
   end
 
-  local args = daemon_args(opts)
+  -- os.clock tells apart two starts within the same second.
+  args.token = "watcher-" .. os.time() .. "-" .. os.clock()
   local encoded = rex.json.encode(args)
   if not encoded then
     rex.log("warn", MODULE .. ": cannot encode the configuration")
@@ -473,6 +495,11 @@ start = function(opts)
   local binary = rex_binary()
   if not binary then
     rex.log("warn", MODULE .. ": rex not found, the watcher did not start")
+    return { running = false }
+  end
+  -- daemon.json goes first: the watcher checks its token in it on its first scan.
+  if not write_json(opts.state_dir .. "/daemon.json", args) then
+    rex.log("warn", MODULE .. ": cannot write to " .. opts.state_dir)
     return { running = false }
   end
   local handle, err = rex.exec.start({ binary, "do", "--all", module_path(), "--args", encoded }, {
@@ -485,7 +512,6 @@ start = function(opts)
     return { running = false }
   end
   write_file(opts.state_dir .. "/daemon.pid", tostring(handle.pid))
-  write_json(opts.state_dir .. "/daemon.json", args)
   return { running = true, pid = handle.pid }
 end
 
@@ -495,6 +521,13 @@ setup = function(input)
     define_actions(opts)
   end
   return start(opts)
+end
+
+-- Each failure in a row doubles the wait, up to eight times `frequency`, so an
+-- unreachable remote is not tried again every few minutes.
+local function fetch_due(opts, repo, now)
+  local wait = opts.frequency * 60 * 2 ^ math.min(repo.failures or 0, 3)
+  return now - (repo.last_fetch or 0) >= wait
 end
 
 local function scan_once(opts, state)
@@ -544,15 +577,17 @@ local function scan_once(opts, state)
       local repo = state.repos[dir] or { last_fetch = 0 }
       repo.path = path
       state.repos[dir] = repo
-      if now - (repo.last_fetch or 0) >= opts.frequency * 60 then
+      if fetch_due(opts, repo, now) then
         repo.last_fetch = now
         local result = fetch(opts, dir)
         if result and result.ok then
           repo.error = nil
+          repo.failures = nil
           fetched = fetched + 1
           log_line(opts, "fetched " .. dir)
         else
-          repo.error = error_text(result)
+          repo.error = error_text(opts, result)
+          repo.failures = (repo.failures or 0) + 1
           failed = failed + 1
           log_line(opts, "failed " .. dir .. ": " .. repo.error)
         end
@@ -562,7 +597,7 @@ local function scan_once(opts, state)
   -- A repository out of sight keeps its entry until its window passes:
   -- dropping it at once made leaving and re-entering fetch again.
   for dir, repo in pairs(state.repos) do
-    if not seen[dir] and now - (repo.last_fetch or 0) >= opts.frequency * 60 then
+    if not seen[dir] and fetch_due(opts, repo, now) then
       state.repos[dir] = nil
     end
   end
@@ -570,15 +605,19 @@ local function scan_once(opts, state)
   state.last_scan_reason = state.reason
   state.fetched = fetched
   state.failed = failed
-  log_line(opts, string.format("scan (%s): sessions=%d blocks=%d paths=%d fetched=%d failed=%d",
-    state.reason, scanned_sessions, scanned_blocks, scanned_paths, fetched, failed))
+  local summary = string.format("sessions=%d blocks=%d paths=%d fetched=%d failed=%d",
+    scanned_sessions, scanned_blocks, scanned_paths, fetched, failed)
+  if summary ~= state.logged_summary then
+    state.logged_summary = summary
+    log_line(opts, "scan (" .. state.reason .. "): " .. summary)
+  end
   return fetched, failed
 end
 
 local function run_daemon(args)
   local input = {}
   for key, value in pairs(args) do
-    if key ~= "daemon" and key ~= "version" then
+    if key ~= "daemon" and key ~= "version" and key ~= "token" then
       input[key] = value
     end
   end
@@ -600,6 +639,7 @@ local function run_daemon(args)
           path = repo.path,
           last_fetch = repo.last_fetch or 0,
           error = repo.error,
+          failures = repo.failures,
         }
       end
     end
@@ -613,6 +653,7 @@ local function run_daemon(args)
         path = repo.path,
         last_fetch = repo.last_fetch,
         error = repo.error,
+        failures = repo.failures,
       }
     end
     table.sort(repos, function(left, right)
@@ -632,6 +673,13 @@ local function run_daemon(args)
   end
 
   local function scan(reason)
+    -- start() names the watcher in charge in daemon.json. One that was
+    -- replaced, or whose state directory is gone, stops here.
+    local current = read_json(opts.state_dir .. "/daemon.json")
+    if not current or current.token ~= args.token then
+      rex.stop()
+      return
+    end
     state.reason = reason
     scan_once(opts, state)
     save_state()
