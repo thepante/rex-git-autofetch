@@ -104,12 +104,14 @@ watcher runs them for every repository you enter, including one unpacked from an
 
 ## Actions
 
-The plugin defines two actions:
+The plugin defines four actions:
 
 | Action | Description |
 | --- | --- |
 | `git_autofetch_status` | Report whether the watcher runs, its PID, and the repositories it fetched. |
 | `git_autofetch_start` | Start the watcher when it is not running. |
+| `git_autofetch_stop` | Stop the watcher until the next start or configuration reload. |
+| `git_autofetch_fetch` | Fetch the repository of the active pane right away. It ignores `scan_paths` and leaves the watcher's schedule as it is. |
 
 Run them from the command line:
 
@@ -179,6 +181,18 @@ that Rex stops starts over on the next try, so raise `timeout` when a repository
 `~/.local/state/rex-git-autofetch/git-autofetch.log`. The status also reports the last error for
 each repository.
 
+## Update
+
+Pull the clone and reload the configuration:
+
+```sh
+git -C ~/.config/rex/rex-git-autofetch pull
+rex config reload
+```
+
+The reload restarts the watcher when the plugin's version or your options changed. To restart it
+on the same version, run `git_autofetch_stop` and then `git_autofetch_start`.
+
 ## Uninstall
 
 1. Set `enabled = false` in `init.lua` and run `rex config reload`, or kill the PID that
@@ -195,3 +209,13 @@ each repository.
 - Worktrees of one repository share a single fetch, because the watcher keys repositories by
   `git-common-dir`; the tmux plugin treats each worktree as its own repository.
 - Failures are visible in `state.json` and the optional log instead of `/tmp`.
+
+## Tests
+
+The tests cover option validation and path matching. Run them with Rex from the clone:
+
+```sh
+rex do tests/run.lua
+```
+
+The command prints the number of checks that passed, or the names of the checks that failed.

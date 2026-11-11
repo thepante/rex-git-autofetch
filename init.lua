@@ -6,7 +6,7 @@
 -- the watcher: a timer scans the panes and terminal.pwd_changed triggers a scan
 -- earlier for shells that report their directory.
 
-local VERSION = "1.1.0"
+local VERSION = "1.2.0"
 local MODULE = "rex-git-autofetch"
 local TERMINAL = "com.superlogical.terminal"
 local LOG_LIMIT = 1024 * 1024
@@ -425,6 +425,16 @@ local function format_time(value)
   return value and os.date("%Y-%m-%d %H:%M:%S", value)
 end
 
+local function stop(opts)
+  local pid = daemon_running(opts.state_dir)
+  if pid then
+    rex.exec({ "kill", "-TERM", tostring(pid) }, { stdout = false, stderr = false })
+  end
+  -- Without daemon.json, a watcher the PID file does not name stops too.
+  os.remove(opts.state_dir .. "/daemon.json")
+  return { running = false }
+end
+
 local setup
 local start
 
@@ -464,9 +474,44 @@ local function define_actions(opts)
       return start(opts)
     end,
   })
+  rex.action({
+    name = "git_autofetch_stop",
+    title = "Git Autofetch: Stop",
+    description = "Stop the git-autofetch watcher until the next start or reload.",
+    keywords = "git autofetch fetch stop",
+    run = function()
+      return stop(opts)
+    end,
+  })
+  rex.action({
+    name = "git_autofetch_fetch",
+    title = "Git Autofetch: Fetch Now",
+    description = "Fetch the repository of the active pane now.",
+    keywords = "git autofetch fetch now",
+    run = function(ctx)
+      local process = rex.call("block.method", {
+        session_id = ctx.session_id,
+        block_id = ctx.block_id,
+        method = "process",
+      })
+      local cwd = process and process.foreground and process.foreground.cwd
+      local dir = cwd and common_dir(opts, cwd)
+      if not dir then
+        return { fetched = false, error = "the active pane is not in a git repository" }
+      end
+      local result = fetch(opts, dir)
+      if result and result.ok then
+        return { fetched = true, dir = dir }
+      end
+      return { fetched = false, dir = dir, error = error_text(opts, result) }
+    end,
+  })
 end
 
 start = function(opts)
+  if not opts.enabled then
+    return stop(opts)
+  end
   rex.exec({ "mkdir", "-p", opts.state_dir }, { stdout = false, stderr = false })
 
   local args = daemon_args(opts)
@@ -474,15 +519,10 @@ start = function(opts)
   if pid then
     local current = read_json(opts.state_dir .. "/daemon.json")
     args.token = current and current.token
-    if opts.enabled and deep_equal(current, args) then
+    if deep_equal(current, args) then
       return { running = true, pid = pid }
     end
     rex.exec({ "kill", "-TERM", tostring(pid) }, { stdout = false, stderr = false })
-  end
-  if not opts.enabled then
-    -- Without daemon.json, a watcher the PID file does not name stops too.
-    os.remove(opts.state_dir .. "/daemon.json")
-    return { running = false }
   end
 
   -- os.clock tells apart two starts within the same second.
@@ -719,4 +759,8 @@ end
 return {
   version = VERSION,
   setup = setup,
+  _test = {
+    validate = validate,
+    pattern_match = pattern_match,
+  },
 }
